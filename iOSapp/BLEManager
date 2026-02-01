@@ -1,0 +1,129 @@
+import Foundation
+import CoreBluetooth
+
+
+
+final class BLEManager: NSObject, ObservableObject {
+
+
+    private var central: CBCentralManager!
+    private var peripheral: CBPeripheral?
+    private var writeChar: CBCharacteristic?
+
+    private let serviceUUID = CBUUID(string: "12345678-1234-1234-1234-1234567890ab")
+    private let charUUID    = CBUUID(string: "abcdefab-1234-5678-1234-abcdefabcdef")
+
+    @Published var status: String = "BLE: idle"
+
+    @Published var lastSentKey: String? = nil
+
+    override init() {
+        super.init()
+        central = CBCentralManager(delegate: self, queue: nil)
+    }
+
+    func send(json: String) {
+        guard let peripheral, let writeChar else {
+            DispatchQueue.main.async { self.status = "BLE: not connected" }
+            return
+        }
+
+        guard let data = json.data(using: .utf8) else { return }
+
+        peripheral.writeValue(data, for: writeChar, type: .withResponse)
+
+        DispatchQueue.main.async { self.status = "BLE: sent" }
+        print("BLE SENT:", json)
+    }
+}
+
+// MARK: - CBCentralManagerDelegate
+extension BLEManager: CBCentralManagerDelegate {
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            status = "BLE: scanning"
+            central.scanForPeripherals(withServices: [serviceUUID])
+        default:
+            status = "BLE: unavailable (\(central.state.rawValue))"
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager,
+                        didDiscover peripheral: CBPeripheral,
+                        advertisementData: [String : Any],
+                        rssi RSSI: NSNumber) {
+
+        if peripheral.name == "CounterEye" {
+            self.peripheral = peripheral
+            central.stopScan()
+            status = "BLE: connecting"
+            central.connect(peripheral)
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager,
+                        didConnect peripheral: CBPeripheral) {
+        status = "BLE: discovering services"
+        peripheral.delegate = self
+        peripheral.discoverServices([serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager,
+                        didFailToConnect peripheral: CBPeripheral,
+                        error: Error?) {
+        status = "BLE: connect failed"
+        print("BLE connect failed:", error?.localizedDescription ?? "unknown")
+        central.scanForPeripherals(withServices: [serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager,
+                        didDisconnectPeripheral peripheral: CBPeripheral,
+                        error: Error?) {
+        status = "BLE: disconnected (rescanning)"
+        print("BLE disconnected:", error?.localizedDescription ?? "nil")
+        self.peripheral = nil
+        self.writeChar = nil
+        central.scanForPeripherals(withServices: [serviceUUID])
+    }
+}
+
+extension BLEManager: CBPeripheralDelegate {
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didDiscoverServices error: Error?) {
+        guard error == nil else {
+            print("discoverServices error:", error!.localizedDescription)
+            return
+        }
+        guard let services = peripheral.services else { return }
+        for service in services where service.uuid == serviceUUID {
+            peripheral.discoverCharacteristics([charUUID], for: service)
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didDiscoverCharacteristicsFor service: CBService,
+                    error: Error?) {
+        guard error == nil else {
+            print("discoverCharacteristics error:", error!.localizedDescription)
+            return
+        }
+        guard let chars = service.characteristics else { return }
+        for ch in chars where ch.uuid == charUUID {
+            writeChar = ch
+            status = "BLE: connected"
+            print("BLE ready (write characteristic found)")
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral,
+                    didWriteValueFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        if let error {
+            print("write error:", error.localizedDescription)
+            DispatchQueue.main.async { self.status = "BLE: write failed" }
+        }
+    }
+}
